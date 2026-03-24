@@ -1,0 +1,14 @@
+# Runtime artifacts
+runs/
+data/
+
+# Node (future)
+node_modules/
+dist/
+.env
+
+# Editor/OS junk
+*.swp
+*.swo
+*.swx
+.DS_Store
