@@ -239,7 +239,8 @@ Potential features:
 - Gmail system labels: `IMPORTANT` (weak), categories (if available)
 - Behavior graph (from history/state):
   - “known person” if previously replied/sent to this address
-  - stream-level open/delete/untrash rates
+  - stream-level star/reply/keep/untrash rates (primary learning signals)
+  - open/delete rates (secondary/weak; opened alone is neutral)
 
 ### “Important” handling
 User observed:
@@ -276,6 +277,12 @@ The user wants the ability to run non-destructively.
 
 Rationale:
 - Enables a workflow: label everything → optionally review → apply trash.
+
+Operational notes:
+- For `--apply=labels` and `--apply=trash`, capture label snapshots:
+  - `BEFORE_APPLY`: current labels before any tool changes
+  - `AFTER_APPLY`: labels after tool-applied triage labels
+- These snapshots enable reliable label-diff feedback and enable `triage reset` to restore pre-run state.
 
 ---
 
@@ -331,18 +338,17 @@ The user requirement:
 
 ### `triage reset --since <window>`
 - Gmail:
-  - Remove all `Triage/*` labels from messages within the window.
+  - Preferred: restore the message’s label set to the last `BEFORE_APPLY` snapshot (best-effort; avoid touching non-triage system labels).
+  - Fallback: remove all `Triage/*` labels from messages within the window.
+- Moves:
+  - Untrash messages the tool moved within the window (default; `--no-undo-moves` to disable).
+  - (Potentially also re-add `INBOX` if tool archived — future.)
 - DB:
   - Delete decisions, feedback events, and label snapshots for messages within the window.
   - This prevents the reset itself from being interpreted as feedback (since there is no remaining baseline snapshot).
 
-### Undo side effects (recommended for “triage never ran”)
-- `triage reset --since <window> --undo-moves`
-  - Untrash messages the tool moved within the window.
-  - (Potentially also re-add `INBOX` if tool archived — future.)
-
 Safety:
-- Undoing moves is riskier; default is label/db-only reset.
+- Provide a “labels-only” option (`--labels-only`) that skips untrash/restores and only removes `Triage/*` + deletes DB records.
 
 ---
 
