@@ -189,6 +189,8 @@ Rationale:
 
 ### Stream granularity
 Default stream should be close to “stable source”:
+- Prefer user-defined **recipient plus-tags** when present:
+  - If a message is addressed to `username+<tag>@gmail.com`, it should map to stream slug `to-<tag>` (configurable prefix).
 - Prefer `List-ID` header (best for mailing lists even when From changes).
 - Else start from from-domain (eTLD+1), but **domain alone is often too coarse**.
 - For heterogeneous domains (e.g., banks), subject/template-based sub-streaming is expected/necessary:
@@ -196,7 +198,7 @@ Default stream should be close to “stable source”:
 
 ### Stream creation
 When encountering a message that does not map confidently to an existing stream:
-- Add/associate it with a **stream candidate** in the DB (keyed by stable metadata like `List-ID`, sender address, and/or subject template).
+- Add/associate it with a **stream candidate** in the DB (keyed by stable metadata like recipient plus-tag, `List-ID`, sender address, and/or subject template).
 - Apply `Triage/Stream/new-stream` in Gmail.
 - Once the candidate crosses a threshold (e.g., 3–10 messages, or high similarity), **promote** it:
   - Create a real stream + `Triage/Stream/<slug>` label.
@@ -235,6 +237,9 @@ For each scanned message, the engine emits one of:
 ### Signals/features (metadata-first)
 Potential features:
 - Headers: `From`, `Reply-To`, `To`, `Cc`, `Subject`, `Date`
+- Parsed address features:
+  - Sender local-part tokens (`no-reply`, `noreply`, `info`, `news`, etc.) as weak-but-useful signals (not hard rules).
+  - Recipient plus-tag (`username+tag@…`) as a strong stream assignment hint (user-defined).
 - Bulk/list indicators: `List-ID`, `List-Unsubscribe`, `Precedence`, `Auto-Submitted`
 - Gmail system labels: `IMPORTANT` (weak), categories (if available)
 - Behavior graph (from history/state):
@@ -381,7 +386,7 @@ Outputs:
   - `id` (UUID)
   - `slug` (unique)
   - `gmail_label_name` (unique)
-  - `source_type` (`LIST_ID` | `DOMAIN` | `ADDRESS`)
+  - `source_type` (`TO_PLUS_TAG` | `LIST_ID` | `DOMAIN` | `ADDRESS`)
   - `source_key` (string)
   - `status` (`ACTIVE` | `MERGED` | `PRUNED`)
   - `created_at`, `updated_at`
