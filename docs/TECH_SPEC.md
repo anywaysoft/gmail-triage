@@ -1,6 +1,6 @@
 # Gmail Triage — Technical Specification (v0.1)
 
-**Last updated:** 2026-03-24 (America/New_York)
+**Last updated:** 2026-03-25 (America/New_York)
 
 This document captures the current product/engineering design for a CLI-first Gmail triage tool.
 
@@ -59,7 +59,7 @@ Goal: automate/simplify this cleanup with a system that:
 - **Learning**:
   - Learn from user behavior + label diffs.
   - Opening an email alone is neutral.
-  - Untrash is a strong signal that auto-trash was wrong.
+  - Untrash **or removing `Triage/AutoTrash`** is a strong signal that auto-trash was wrong.
   - Changing/removing stream labels should provide feedback and drive better clustering.
 - **Reset/troubleshooting**:
   - A reset mode that makes a time window look like triage never ran (Gmail + DB).
@@ -129,6 +129,10 @@ All tool-managed labels are under a single prefix.
   - “Needs human review.”
   - Must remain **in Inbox** and **unread**.
 
+- `Triage/Keep`
+  - “Worthy of attention / keep.”
+  - Stays in **Inbox** (the tool should not auto-archive).
+
 - `Triage/Stream/<slug>`
   - One label per stream.
   - `<slug>` is friendly and human-readable.
@@ -139,18 +143,23 @@ All tool-managed labels are under a single prefix.
   - Small fixed set of codes to avoid label explosion.
 
 ### Optional/advanced labels
-- `Triage/NewStreamCandidate`
-  - Applied when the engine creates a brand-new stream.
+- `Triage/Stream/new-stream`
+  - A reserved “marker” label for:
+    - brand-new streams (optional, to make them easy to find in Gmail), and/or
+    - fail-safe overflow when the tool hits a stream-label cap (see §7).
 
-- `Triage/Override/*`
-  - Explicit user overrides (strong feedback and always respected).
+- `Triage/Train/*`
+  - Optional per-message training labels (for explicit feedback without needing to untrash).
   - Examples:
-    - `Triage/Override/Keep`
-    - `Triage/Override/Review`
-    - `Triage/Override/AutoTrash`
+    - `Triage/Train/Keep`
+    - `Triage/Train/Review`
+    - `Triage/Train/AutoTrash`
 
 Notes:
-- Label diffs (remove/replace stream labels) are also treated as feedback, but explicit override labels are the cleanest.
+- Stream labels (`Triage/Stream/*`) are **classification** (“this message belongs with Foo”).
+- Decision labels (`Triage/AutoTrash` / `Triage/Review` / `Triage/Keep`) are **per-message dispositions**.
+- Label diffs (remove/replace stream labels) are treated as feedback; `Triage/Train/*` is an optional explicit channel.
+- Single-message edits are treated as training signals; stream-level policy changes should be driven by aggregate evidence (rates/thresholds), not an implicit “edit one message → flip the whole stream”.
 
 ---
 
@@ -161,7 +170,7 @@ The tool must **not** wander into deep history by default.
 ### Selection window
 - CLI accepts `--since` (duration or timestamp).
 - Default behavior:
-  - If a prior successful run exists, default to “since last run” (minus small overlap).
+  - If a prior **applied** run exists (`--apply != none`), default to “since last applied run” (minus small overlap).
   - Otherwise default to a bounded window (e.g., 14 days).
 
 ### Gmail query strategy (MVP)
@@ -172,6 +181,7 @@ The tool must **not** wander into deep history by default.
 
 Rationale:
 - Time window is safer than “stop at first processed” (paging/sorting is not guaranteed stable).
+- Learning/feedback may still look further back, but only across messages the tool previously triaged (not the whole inbox).
 
 ---
 
@@ -187,7 +197,7 @@ Default stream should be close to “stable source”:
 When encountering a message that does not map confidently to an existing stream:
 - Create a new stream in the DB.
 - Create `Triage/Stream/<slug>` label.
-- Apply `Triage/NewStreamCandidate` label to the message (optional).
+- Optionally also apply `Triage/Stream/new-stream` to make brand-new streams easy to find in Gmail.
 
 ### Stream splitting (automated)
 User wants maximal automation. Splitting should be automatic when evidence is strong:
@@ -199,7 +209,7 @@ Because user prefers a label per stream:
 - Provide pruning tooling:
   - `triage prune-labels --older-than 180d` deletes unused/empty stream labels.
 - Provide a configurable cap:
-  - `--max-stream-labels` (fails safe by collapsing excess into `_new`).
+  - `--max-stream-labels` (fails safe by collapsing excess into `Triage/Stream/new-stream`).
 
 ---
 
@@ -209,10 +219,12 @@ Because user prefers a label per stream:
 For each scanned message, the engine emits one of:
 - `AUTO_TRASH`
 - `REVIEW`
-- `SKIP` (rare; do nothing except record in DB/digest)
+- `KEEP`
 
 ### Key behavior constraints
 - `REVIEW` items stay in **Inbox** and **unread**.
+- `KEEP` items stay in **Inbox** (the tool should not mark read).
+- Starred messages (Gmail “star”/favorite) must be treated as `KEEP` regardless of other signals.
 - `AUTO_TRASH` items:
   - Always get the `Triage/AutoTrash` label.
   - Are moved to Trash only in destructive mode.
@@ -244,19 +256,20 @@ The user wants the ability to run non-destructively.
 ### `--apply=none`
 - No Gmail changes.
 - Produce digest with planned actions.
-- Optionally still writes a run record (implementation choice; for MVP, yes).
+- DB behavior:
+  - Allowed to write a run record for auditability, but it must be marked as a dry-run and **must not** advance “since last run” defaults or idempotence.
 
 ### `--apply=labels`
 - Apply labels only:
   - `Triage/Processed`
-  - decision label (`Triage/AutoTrash` or `Triage/Review`)
+  - decision label (`Triage/AutoTrash` / `Triage/Review` / `Triage/Keep`)
   - stream label
   - why label
 - Do not move messages to Trash.
 
 ### `--apply=trash`
 - First apply labels as in `labels`.
-- Then move all messages labeled `Triage/AutoTrash` to Trash.
+- Then move all messages decided `AUTO_TRASH` in this run to Trash.
 
 Rationale:
 - Enables a workflow: label everything → optionally review → apply trash.
@@ -265,33 +278,41 @@ Rationale:
 
 ## 10) Feedback & learning
 
-### Feedback sources (priority)
-Strong negative:
-- **Untrash** of an `AUTO_TRASH` message
-
-Strong positive:
-- Replies
-- Stars
-- Explicit override labels
+### “Signals against trashing” (priority)
+Strong signals:
+- **Untrash** of an `AUTO_TRASH` message (strong “do not auto-trash this stream”).
+- **Starred (“favorite”)**: always keep starred messages; also a strong keep signal for the stream.
+- Replies: strong keep signal for the message and stream.
+- `Triage/Train/Keep` (optional explicit supervision).
 
 Weak/neutral:
-- Opened/read alone (neutral)
+- Opened/read alone (neutral; do not assume the model was wrong).
 
-Weak negative:
-- Message was `REVIEW` and user deletes without reading
+Signals toward trashing (weak/moderate):
+- Message was `REVIEW` and user deletes (especially without reading).
+- Very low keep/star/reply rates for a stream over time.
+
+Stream-level aggregation:
+- Maintain per-stream rates (star/reply/keep/untrash) and use them to tune default policy and per-message confidence.
 
 ### Label-diff feedback (explicit goal)
 User wants:
 - If something is labeled `Triage/Stream/Foo` and user removes or replaces that label, the system should treat it as feedback.
 
 Mechanism:
-- Store per-message label snapshot after each run.
+- Store per-message label snapshot(s) for messages the tool touched (baseline for future diffs).
 - Next run, re-fetch labels for recently touched messages and diff.
+- Diff should be computed against the last `AFTER_APPLY` snapshot for that message (so tool-applied labels don’t look like user edits).
+
+Important: the feedback scan window may be different from the classification window:
+- Classification window is controlled by `--since` (bounded; protects against deep history).
+- Feedback scan should look back over prior triaged messages (e.g., `--feedback-since 30d`) to detect untrash/label moves.
 
 Semantics:
 - Remove `Triage/Stream/Foo` → `stream_reject(Foo)`.
 - Replace Foo→Bar → `stream_move(Foo→Bar)`.
-- Remove `Triage/AutoTrash` → `decision_reject(AUTO_TRASH)` (unless it happened via `triage reset`).
+- Remove `Triage/AutoTrash` → `decision_reject(AUTO_TRASH)` (often means “demote stream to REVIEW”, not “keep forever”).
+- Add `Triage/Keep` or star a message → `decision_promote(KEEP)`.
 
 ### Automated re-clustering
 When rejects cluster around a differentiator:
@@ -309,9 +330,10 @@ The user requirement:
 - Gmail:
   - Remove all `Triage/*` labels from messages within the window.
 - DB:
-  - Delete run/decision/action/feedback records for that window.
+  - Delete decisions, feedback events, and label snapshots for messages within the window.
+  - This prevents the reset itself from being interpreted as feedback (since there is no remaining baseline snapshot).
 
-### Optional: undo side effects
+### Undo side effects (recommended for “triage never ran”)
 - `triage reset --since <window> --undo-moves`
   - Untrash messages the tool moved within the window.
   - (Potentially also re-add `INBOX` if tool archived — future.)
@@ -323,11 +345,11 @@ Safety:
 
 ## 12) Digest format
 
-Digest should be Markdown and always emitted.
+Digest should always be emitted.
 
 Suggested sections:
 - Run summary (time window, apply mode, limits)
-- Counts (scanned, autotrash, review, skipped)
+- Counts (scanned, autotrash, review, keep)
 - Top streams by volume
 - New streams created (if any)
 - Auto-splits performed (if any)
@@ -339,6 +361,7 @@ Suggested sections:
 Outputs:
 - `--digest stdout` (default)
 - `--digest <path>` writes file
+- `--digest-format md|json` (default `md`)
 
 ---
 
@@ -358,6 +381,7 @@ Outputs:
   - `id` (UUID)
   - `started_at`, `ended_at`
   - `since` (timestamp/duration representation)
+  - `status` (`APPLIED` | `DRY_RUN`)
   - `apply_mode` (`NONE` | `LABELS` | `TRASH`)
   - `version` (engine version)
 
@@ -370,13 +394,15 @@ Outputs:
 - `decisions`
   - `run_id`, `message_id`
   - `stream_id`
-  - `decision` (`AUTO_TRASH` | `REVIEW` | `SKIP`)
+  - `decision` (`AUTO_TRASH` | `REVIEW` | `KEEP`)
   - `confidence` (0..1)
   - `primary_why_code`
 
 - `label_snapshots`
+  - `run_id`
   - `message_id`
   - `captured_at`
+  - `kind` (`BEFORE_APPLY` | `AFTER_APPLY`)
   - `labels_json` (stored as TEXT; avoid JSONB-only features)
 
 - `feedback_events`
@@ -412,7 +438,9 @@ OAuth/token storage:
 
 ### Phase 2 (bills)
 - Detect bills/statement emails and extract amount/due date.
-- Create tasks (provider TBD).
+- Create tasks (preferred: Google Tasks API, since Gmail UI already supports “Add to Tasks”).
+  - Use Google Tasks API via `googleapis` (OAuth scope `https://www.googleapis.com/auth/tasks`).
+  - Store a backlink to the Gmail message/thread in the task notes.
 
 ### Phase 3 (UI)
 - Chrome extension / Gmail sidebar that shows:
@@ -430,5 +458,4 @@ OAuth/token storage:
 - Exact default `--since` window (14d?) and overlap.
 - How aggressively to auto-split streams (thresholds).
 - How to compute subject templates without model calls.
-- Whether to apply any labels to “SKIP/keep” messages.
-
+- Default `--feedback-since` lookback window (30d? 90d?).
