@@ -144,9 +144,9 @@ All tool-managed labels are under a single prefix.
 
 ### Optional/advanced labels
 - `Triage/Stream/new-stream`
-  - A reserved “marker” label for:
-    - brand-new streams (optional, to make them easy to find in Gmail), and/or
-    - fail-safe overflow when the tool hits a stream-label cap (see §7).
+  - A reserved **pseudo-stream** label for messages that do not (yet) fit any existing stream.
+  - Used when we intentionally delay creating a new stream label until we have enough evidence (see §7).
+  - Also used as fail-safe overflow when the tool hits a stream-label cap (see §7).
 
 - `Triage/Train/*`
   - Optional per-message training labels (for explicit feedback without needing to untrash).
@@ -190,14 +190,17 @@ Rationale:
 ### Stream granularity
 Default stream should be close to “stable source”:
 - Prefer `List-ID` header (best for mailing lists even when From changes).
-- Else prefer from-domain (eTLD+1).
-- Subject-based splitting is optional and should only happen when necessary.
+- Else start from from-domain (eTLD+1), but **domain alone is often too coarse**.
+- For heterogeneous domains (e.g., banks), subject/template-based sub-streaming is expected/necessary:
+  - Example: both “credit card bill” and “you are pre-qualified!” may come from `chase.com`.
 
 ### Stream creation
 When encountering a message that does not map confidently to an existing stream:
-- Create a new stream in the DB.
-- Create `Triage/Stream/<slug>` label.
-- Optionally also apply `Triage/Stream/new-stream` to make brand-new streams easy to find in Gmail.
+- Add/associate it with a **stream candidate** in the DB (keyed by stable metadata like `List-ID`, sender address, and/or subject template).
+- Apply `Triage/Stream/new-stream` in Gmail.
+- Once the candidate crosses a threshold (e.g., 3–10 messages, or high similarity), **promote** it:
+  - Create a real stream + `Triage/Stream/<slug>` label.
+  - Re-label recent candidate messages from `Triage/Stream/new-stream` → `Triage/Stream/<slug>` (best-effort).
 
 ### Stream splitting (automated)
 User wants maximal automation. Splitting should be automatic when evidence is strong:
@@ -418,15 +421,20 @@ Notes:
 
 ---
 
-## 14) Implementation notes (Node/TypeScript)
+## 14) Implementation notes (Python)
 
-Language: **TypeScript/Node** for backend/CLI.
+Language: **Python** (CLI-first MVP).
+
+Design constraint: keep the **categorization engine** importable and side-effect free:
+- Engine takes message metadata + state and returns decisions/whys.
+- Gmail API + DB are adapters the CLI (and a future server/UI) can reuse.
 
 Suggested libraries (subject to final selection):
-- Gmail API client: `googleapis`
-- CLI: `commander` or `yargs`
-- DB: `kysely` or `drizzle` (must support SQLite + Postgres)
-- Migrations: tool-specific (keep dialect-neutral)
+- Gmail API client: `google-api-python-client`, `google-auth`, `google-auth-oauthlib`
+- CLI: `typer`
+- DB: `SQLAlchemy` (SQLite + Postgres), Postgres driver: `psycopg`
+- Migrations: `alembic`
+- ML (optional, local): `scikit-learn`, `hdbscan`
 
 OAuth/token storage:
 - Local: file in a `data/` directory with strict permissions or OS keychain integration.
